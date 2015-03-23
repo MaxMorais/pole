@@ -35,6 +35,14 @@ language, encode = (locale.setlocale(locale.LC_ALL, '') + '..').split('.')[:2]
 # Importing e configuration internationalization module gettex
 import os.path
 import gettext
+import hashlib
+from decimal import Decimal, ROUND_DOWN
+import PoleLog
+import string
+
+from dateutil.relativedelta import relativedelta
+from dateutil.rrule import MONTHLY, rrule, WEEKLY
+
 
 def load_pole_translations(DIR):
     gettext.bindtextdomain(APP, DIR)
@@ -43,7 +51,7 @@ def load_pole_translations(DIR):
 _ = gettext.gettext
 
 DIR = '/usr/share/locale'
-for locale_folder in ('../pole/po/locale', 'pole/po/locale', 'po/locale', 'locale', '../po/locale', '../locale', '/usr/share/locale', '/usr/local/share/locale', '/usr/local/'):
+for locale_folder in ('../../pole/po/locale', '../pole/po/locale', 'pole/po/locale', 'po/locale', 'locale', '../po/locale', '../locale', '/usr/share/locale', '/usr/local/share/locale', '/usr/local/'):
     if os.path.exists(locale_folder + '/' + language + '/LC_MESSAGES/' + APP + '.mo'):
         DIR = locale_folder
         load_pole_translations(DIR)
@@ -57,7 +65,7 @@ import unicodedata
 import mimetypes
 import base64
 import sys
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 
 def digits(string, zero_when_empty = True):
     """\brief Extrai apenas os dígitos de uma lista de \a caracteres.
@@ -1102,6 +1110,7 @@ DATE_TIME = 2
 MONTH = 3
 HOURS = 4
 DAYS_HOURS = 5
+HOLLERITH = 6
 try: # Try to identify date and time formats via nl_langinfo
     TIME_FORMAT = locale.nl_langinfo(locale.T_FMT)
     DATE_FORMAT = re.sub('[^%a-zA-Z]', '/', locale.nl_langinfo(locale.D_FMT))
@@ -1136,6 +1145,13 @@ def convert_and_format(content, return_type, decimals = locale.localeconv()['fra
         content = ""
     elif type(content) not in (int, long, bool, float, str, unicode, datetime.date, datetime.time, datetime.datetime, datetime.timedelta):
         raise TypeError, _('Invalid argument "content" of type `%s´. Expected int, long, bool, float, str, date, time or datetime.') % (type(content).__name__,)
+
+    # Pole types
+    if type(return_type) in (str, unicode):
+        if return_type not in tipos:
+            raise TypeError, _('Invalid argument "return_type" like a value. Expected int, long, bool, float, str, date, time or datetime.')
+        tipo, tamanho, casas, cxopc, caracteres, mascara, padrao, alteravel, alinhamento = tipos[return_type]
+        return convert_and_format(content, python_tipo[tipo], casas)
 
     # Verifying type of return_type
     if type(return_type) != type and return_type not in (datetime.datetime, datetime.date, datetime.time, datetime.timedelta):
@@ -1411,12 +1427,12 @@ def convert_and_format(content, return_type, decimals = locale.localeconv()['fra
             value = return_type(content)
     # Converting str content with locale support
     else:
-        if return_type == float:
-            value = locale.atof(content)
-        elif return_type == int:
-            value = int(round(locale.atof(content)))
-        elif return_type == long:
-            value = long(round(locale.atof(content)))
+        if return_type in (float, int, long):
+            decimal = locale.localeconv()['decimal_point']
+            content = re.sub('[^0-9%s]' % decimal, '', content)
+            value = 0. if not content else locale.atof(content)
+            if return_type != float:
+                value = return_type(round(value))
         elif return_type == bool:
             bs_up = [[i.upper() for i in bool_strings[0]], [i.upper() for i in bool_strings[1]]]
             if content.upper() in bs_up[0] + bs_up[1]:
@@ -1473,7 +1489,8 @@ def add_months(date, months):
     return date
 
 def last_day(date):
-    date = convert_and_format(date, datetime.date)[0]
+    return_type = datetime.datetime if isinstance(date, datetime.datetime) else datetime.date
+    date = convert_and_format(date, return_type)[0]
     if date.month in (1, 3, 5, 7, 8, 10, 12):
         date = date.replace(day = 31)
     elif date.month in (4, 6, 9, 11):
@@ -1936,3 +1953,101 @@ def fetchdict(cur, one = False):
         return [OrderedDict(zip(columns, reg)) for reg in cur]
     except TypeError:
         return []
+
+
+def fetchtuple(cur):
+    columns = [c[0].lower() for c in cur.description]
+    Row = namedtuple('row', columns)
+    try:
+        return [Row._make(row) for row in cur]
+    except TypeError:
+        return []
+
+
+def fetchtupleone(cur):
+    columns = [c[0].lower() for c in cur.description]
+    Row = namedtuple('row', columns)
+
+    try:
+        return Row._make(cur.fetchone())
+    except TypeError:
+        return None
+
+
+def make_pwd_hash(pwd):
+    phash = hashlib.md5()
+    phash.update(pwd)
+    return phash.hexdigest()
+
+
+def sql_like(value):
+    return '%{}%'.format('%'.join(value.split()))
+
+
+def sql_in(values):
+    return ', '.join([':id%d' % x for x in xrange(len(values))])
+
+
+def truncate(value):
+    return float(Decimal(value).quantize(Decimal('0.01'), rounding=ROUND_DOWN))
+
+
+def get_name_of_month(today, date):
+    current_month = datetime.datetime(today.year, today.month, 1)
+    name = ''
+
+    if date < current_month:
+        name = (datetime.datetime.strftime(date, '%Y_') +
+                string.capitalize(datetime.datetime.strftime(date, '%B')))
+
+    return name
+
+
+def get_danfe_path(rootdir, key, today, emit_date):
+    subfolder = get_name_of_month(today, emit_date)
+    return os.path.join(rootdir, subfolder, 'PDF', key + '.pdf')
+
+
+def first_day(date):
+    return convert_and_format(date, datetime.date, MONTH)[0]
+
+WEEKINDEX = {'SEG': 0, 'TER': 1, 'QUA': 2, 'QUI': 3, 'SEX': 4, 'SAB': 5, 'DOM': 6}
+
+
+def due_date(dtstart, days):
+    return [dtstart + relativedelta(days=day) for day in days]
+
+
+def due_date_to_nearest_monthday(dtstart, days, monthday):
+    return [min(rrule(MONTHLY,
+                      bymonthday=monthday,
+                      dtstart=day - relativedelta(days=30),
+                      until=day + relativedelta(days=30)),
+                key=lambda x: abs(x - day))
+            for day in due_date(dtstart, days)]
+
+
+def due_date_to_nearest_weekday(dtstart, days, weekdays):
+    return [min(rrule(WEEKLY,
+                      byweekday=[WEEKINDEX.get(d, 0) for d in weekdays],
+                      dtstart=day - relativedelta(weeks=1),
+                      until=day + relativedelta(weeks=1)),
+                key=lambda x: abs(x - day))
+            for day in due_date(dtstart, days)]
+
+
+def due_date_to_next_weekday(dtstart, days, weekdays):
+    return [rrule(WEEKLY,
+                  byweekday=[WEEKINDEX.get(d, 0) for d in weekdays],
+                  count=1,
+                  dtstart=day)[0]
+            for day in due_date(dtstart, days)]
+
+
+def slug(text):
+    text = normalize(text).lower()
+    return re.sub(r'\W+', '-', text)
+
+
+def normalize(text):
+    return unicodedata.normalize('NFKD', text.decode('utf-8')).encode('ascii', 'ignore')

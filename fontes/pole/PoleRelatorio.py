@@ -43,6 +43,10 @@ def gerar_pdf(paisagem, data_inicial, data_final, titulo_relatorio,
     casas_default = PoleUtil.locale.localeconv()['frac_digits']
     for registro in cabecalho_colunas:
         registro = list(registro)
+
+        if registro[1] == 0:
+            continue
+
         if len(registro) < 4:
             registro += [casas_default, '']
         else:
@@ -194,7 +198,7 @@ def gerar_pdf(paisagem, data_inicial, data_final, titulo_relatorio,
             b = cf(totalizado[int(b)], float)[0]
             if t.lower()[:4] == 'perc':
                 t = 'Porcentagem %i' % PoleUtil.locale.localeconv()['frac_digits']
-            totalizado[n] = formatar((a / b) * 100, t)
+            totalizado[n] = formatar((a / b) * 100 - 100, t)
     # Inclusão do totalizado no final dos dados
     dados_tabela.append([Paragraph(t, e) for t, e in zip(totalizado, estilos)])
     # Separação dos dados de cada página

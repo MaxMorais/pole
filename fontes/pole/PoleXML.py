@@ -15,6 +15,7 @@ Todos os direitos reservados
 # Módulo para validação de XML e importação
 import lxml.etree
 import os
+import StringIO
 
 # Módulo feito por Junior Polegato em CPython para assinar XML
 try:
@@ -112,14 +113,14 @@ class XML(object):
 
     def __getitem__(self, atributo):
         #~ print '__getitem__', atributo
-        if type(atributo) != str:
+        if not isinstance(atributo, (str, unicode)):
             raise TypeError('Atributo de um nó XML precisa ser string.')
         if atributo not in self.__atributos:
             return None
         return self.__valores[self.__atributos.index(atributo)]
 
     def __delitem__(self, atributo):
-        if type(atributo) != str:
+        if not isinstance(atributo, (str, unicode)):
             raise TypeError('Atributo de um nó XML precisa ser string.')
         if atributo not in self.__atributos:
             raise TypeError('O valor None apaga um atributo, mas ele não existe. Atributo: %s' % atributo)
@@ -128,7 +129,7 @@ class XML(object):
 
     def __setitem__(self, atributo, valor):
         #~ print '__setitem__', atributo, valor
-        if type(atributo) != str:
+        if not isinstance(atributo, (str, unicode)):
             raise TypeError('Atributo de um nó XML precisa ser string.')
         if valor is None:
             if atributo not in self.__atributos:
@@ -178,8 +179,8 @@ class XML(object):
 
     def __call__(self, filho = None, qual = 0):
         '''Se filho for None, cria um novo nó e adiciona a estrutura, util para criar nós com mesmo nome.
-           Se filho for int, retorna enésimo filho do nó pai.
-           Se filho for '' equivale a todos os filhos para uso com string abaixo
+           Se filho for int, retorna enésimo filho do nó pai; se 0, retorna quantos irmãos com este nome.
+           Se filho for '' equivale a todos os filhos para uso com string abaixo:
            Se filho for string e qual for inteiro igual a 0, retorna quantos filhos com este nome tem.
            Se filho for string e qual for inteiro igual a -1 (FILHO), cria um novo filho e adiciona a estrutura, util para criar filhos com mesmo nome ou a partir de string.
            Se filho for string e qual for inteiro igual a -2 (TEXTO), adiciona um elemento texto ao elemento chamador.
@@ -227,6 +228,7 @@ class XML(object):
                 raise IndexError('Não encontrado o ' + str(qual) + 'º filho "' + filho + '" dentre o(s) ' + str(len(self.__filhos)) + ' filho(s) que o nó "' + self.__nome + '" possui.')
             return self.__xmls[qual - 1]
         contador = qual
+        n = 0
         for n, f in enumerate(self.__filhos):
             #~ print f, filho, f == filho, qual
             if f == filho:
@@ -270,9 +272,15 @@ class XML(object):
             return str(self) >= str(valor)
         return str(self) >= valor
 
-def importar(xml):
+def importar(xml, html = False):
     def _importar(pai, elemento):
-        atual = pai(elemento.tag.split('}')[-1], FILHO)
+        # print type(elemento), elemento, elemento.tag
+        if isinstance(elemento, lxml.etree._Comment):
+            atual = pai('!--', FILHO)
+        elif isinstance(elemento, lxml.etree._ProcessingInstruction):
+            atual = pai('?xml', FILHO)
+        else:
+            atual = pai(elemento.tag.split('}')[-1], FILHO)
         parent = elemento.getparent()
         if parent is not None:
             ns_pai = elemento.getparent().nsmap
@@ -287,7 +295,8 @@ def importar(xml):
                 atual['xmlns:' + ns] = unescape(elemento.nsmap[ns])
         for a in elemento.attrib:
             atual[a] = elemento.attrib[a]
-        if elemento.text is not None:
+        if (elemento.text is not None and not
+               isinstance(elemento, lxml.etree._ProcessingInstruction)):
             for texto in elemento.text.split('\n'):
                 texto2 = unescape(texto)
                 if len(texto2):
@@ -305,9 +314,14 @@ def importar(xml):
         xml = open(xml).read().lstrip('\xef\xbb\xbf')
     if xml[0] != '<':
         raise ValueError("Arquivo ou string XML inválido, não iniciado por `<´.")
-    doc = lxml.etree.fromstring(xml)
     retorno = XML()
-    _importar(retorno, doc)
+    if html:
+        parser = lxml.etree.HTMLParser()
+        doc = lxml.etree.parse(StringIO.StringIO(xml), parser)
+        _importar(retorno, doc.getroot())
+    else:
+        doc = lxml.etree.fromstring(xml)
+        _importar(retorno, doc)
     return retorno
 
 def validar(xml, arquivo_xsd):
@@ -419,7 +433,7 @@ def exportar(xml, endentacao = 4, nivel = 0, com_marca_xml = True, escapado = Tr
             quebra = '\n'
         conteudo = ''
         for nome_filho, xml_filho in zip(xml._XML__filhos, xml._XML__xmls):
-            if xml_filho is None or (type(xml_filho) == str and xml_filho == ''):
+            if xml_filho is None or (isinstance(xml_filho, (str, unicode)) and xml_filho == ''):
                 continue
             if isinstance(xml_filho, XML):
                 atributos = ''
@@ -431,9 +445,15 @@ def exportar(xml, endentacao = 4, nivel = 0, com_marca_xml = True, escapado = Tr
                         atributos += ' ' + atributo + '="' + _escape(valor) + '"'
                 netos = _exportar(xml_filho, endentacao, nivel + 1)
                 if len(netos):
-                    conteudo += dente + '<' + ns + nome_filho + atributos + '>' + (netos, quebra + netos + dente)[netos.count('<') > 0 or netos.count('\n') > 1] + '</' + ns + nome_filho + '>' + quebra
+                    if nome_filho == '!--':
+                        conteudo += dente + '<!-- ' + netos + ' -->' + quebra
+                    else:
+                        conteudo += dente + '<' + ns + nome_filho + atributos + '>' + (netos, quebra + netos + dente)[netos.count('<') > 0 or netos.count('\n') > 1] + '</' + ns + nome_filho + '>' + quebra
                 else:
-                    conteudo += dente + '<' + ns + nome_filho + atributos + '/>' + quebra
+                    if nome_filho == '?xml':
+                        conteudo += dente + '<?xml' + atributos + '?>' + quebra
+                    else:
+                        conteudo += dente + '<' + ns + nome_filho + atributos + '/>' + quebra
             else:
                 if conteudo and endentacao < 0:
                     if conteudo[-1] == '>':
@@ -453,7 +473,9 @@ def exportar(xml, endentacao = 4, nivel = 0, com_marca_xml = True, escapado = Tr
     xml_nss = nss(xml)
     exportado = _exportar(xml, endentacao, nivel)
     if xml_nss and exportado and exportado[0] == '<':
-        p = min(exportado.find(' '), exportado.find('>'), exportado.find('/'))
+        p = min(exportado.find('>'), exportado.find('/'))
+        if ' ' in exportado:
+            p = min(p, exportado.find(' '))
         xml_nss = ''.join(' %s="%s"' % x for x in xml_nss.items())
         exportado = exportado[:p] + xml_nss + exportado[p:]
     if com_marca_xml:
@@ -462,3 +484,16 @@ def exportar(xml, endentacao = 4, nivel = 0, com_marca_xml = True, escapado = Tr
 
 def serializar(xml):
     return exportar(xml, -1)
+
+def procurar(xml, nome_no, atributos = None):
+    retorno = []
+    for nome_filho, xml_filho in zip(xml._XML__filhos, xml._XML__xmls):
+        if nome_filho == nome_no:
+            if atributos:
+                if sum(map(lambda x: x in xml_filho._XML__atributos, atributos)):
+                    retorno.append(xml_filho)
+            else:
+                retorno.append(xml_filho)
+        if isinstance(xml_filho, XML):
+            retorno += procurar(xml_filho, nome_no, atributos)
+    return retorno

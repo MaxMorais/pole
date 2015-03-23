@@ -30,6 +30,8 @@ import re
 from string import strip
 import logging
 import traceback
+import pango
+import importlib
 
 logger = logging.getLogger('pole')
 
@@ -52,6 +54,7 @@ def message(widget, text, message_type = gtk.MESSAGE_INFO, title = None):
     flags = flags = gtk.DIALOG_MODAL | gtk.DIALOG_DESTROY_WITH_PARENT
     dialog = gtk.MessageDialog(widget.get_toplevel(), flags,
                                             message_type, buttons, text)
+
     if title is None:
         title = message_titles[message_type]
     dialog.set_title(title)
@@ -71,15 +74,23 @@ def warning(widget, text, title = None):
 def question(widget, text, title = None):
     return message(widget, text, gtk.MESSAGE_QUESTION, title)
 
-def error_detail(widget, text, detail, title='Erro'):
+def error_detail(widget, text, detail_info, title=None):
+    detail(widget, text, detail_info, title, gtk.MESSAGE_ERROR)
+
+def warning_detail(widget, text, detail_info, title='Warning'):
+    detail(widget, text, detail_info, title, gtk.MESSAGE_WARNING)
+
+def detail(widget, text, detail_info, title=None, message_type=gtk.MESSAGE_INFO):
     # Get toplevel window
     if isinstance(widget, gtk.Widget):
         window = widget.get_toplevel()
     else:
         window = None
     # Create Message dialog with hidden details
+    if title is None:
+        title = message_titles[gtk.MESSAGE_ERROR]
     flags = gtk.DIALOG_MODAL | gtk.DIALOG_DESTROY_WITH_PARENT
-    dialog = gtk.MessageDialog(window, flags, gtk.MESSAGE_ERROR,
+    dialog = gtk.MessageDialog(window, flags, message_type,
                                      gtk.BUTTONS_CLOSE, text)
     dialog.format_secondary_text(' ')
     dialog.set_title(title)
@@ -92,9 +103,9 @@ def error_detail(widget, text, detail, title='Erro'):
     text_view = gtk.TextView(text_buffer)
     scroll.set_shadow_type(gtk.SHADOW_IN)
     scroll.set_policy(gtk.POLICY_AUTOMATIC, gtk.POLICY_AUTOMATIC)
-    text_buffer.set_text(detail)
+    text_buffer.set_text(detail_info)
     text_view.set_editable(False)
-    text_view.set_size_request(-1, 300)
+    text_view.set_size_request(500, 200)
     vbox.pack_start(expander, False, False)
     expander.add(scroll)
     scroll.add(text_view)
@@ -119,7 +130,77 @@ def show_exception(project, args):
                 break
     return error_detail(obj, pri_text, '\n'.join(exc_message), title)
 
-def load_images_as_icon(path = '.'):
+
+def save(parent=None, title='', filename='', folder=None):
+    filechooser = gtk.FileChooserDialog(title or _('Save'),
+                                        parent.get_toplevel(),
+                                        gtk.FILE_CHOOSER_ACTION_SAVE,
+                                        (gtk.STOCK_CANCEL, gtk.RESPONSE_CANCEL,
+                                         gtk.STOCK_SAVE, gtk.RESPONSE_OK))
+    if filename:
+        filechooser.set_current_name(filename)
+    filechooser.set_default_response(gtk.RESPONSE_OK)
+
+    if folder:
+        filechooser.set_current_folder(folder)
+
+    path = None
+    while True:
+        response = filechooser.run()
+        if response != gtk.RESPONSE_OK:
+            path = None
+            break
+
+        path = filechooser.get_filename()
+        if not os.path.exists(path):
+            break
+
+        elif os.path.exists(path) and question(filechooser, 'Sobrescrever arquivo?'):
+            break
+
+    filechooser.destroy()
+    return path
+
+
+def selectfile(title='', parent=None, folder=None, filters=[]):
+    filechooser = gtk.FileChooserDialog(title or _('Select file'),
+                                        parent,
+                                        gtk.FILE_CHOOSER_ACTION_OPEN,
+                                        (gtk.STOCK_CANCEL, gtk.RESPONSE_CANCEL,
+                                         gtk.STOCK_OPEN, gtk.RESPONSE_OK))
+
+    for f in filters:
+        filechooser.add_filter(f)
+
+    if folder:
+        filechooser.set_current_folder(folder)
+
+    filechooser.set_default_response(gtk.RESPONSE_OK)
+
+    try:
+        if filechooser.run() == gtk.RESPONSE_OK:
+            return filechooser.get_filename()
+
+    finally:
+        filechooser.destroy()
+
+
+def show_toolbutton_menu(toolbutton, menu):
+    toolbutton.children()[0].children()[1].clicked()
+    x, y = toolbutton.get_toplevel().window.get_origin()
+    x += toolbutton.allocation.x
+    y += toolbutton.allocation.y + toolbutton.allocation.height
+    menu.popup(None, None, lambda m: (x, y, True), 0, 0)
+
+
+def pixbuf_new_from_binary(binary):
+    pixloader = gtk.gdk.PixbufLoader()
+    pixloader.write(binary)
+    pixloader.close()
+    return pixloader.get_pixbuf()
+
+
+def load_images_as_icon(path='.'):
     for file in os.listdir(path):
         try:
             pixbuf = gtk.gdk.pixbuf_new_from_file(path + os.sep + file)
@@ -159,6 +240,7 @@ class PopupWindow(gtk.Window, gtk.Buildable):
             self.set_property('has_resize_grip', False)
         except:
             pass
+        self.__canceled = False
 
     def do_delete_event(self, event):
         return True
@@ -206,8 +288,10 @@ class PopupWindow(gtk.Window, gtk.Buildable):
         self.__loop.run()
         gtk.gdk.pointer_ungrab()
         self.hide()
+        return not self.__canceled
 
     def do_focus_out_event(self, event):
+        self.__canceled = True
         self.quit(self, event)
 
     def do_button_press_event(self, event):
@@ -224,6 +308,7 @@ class PopupWindow(gtk.Window, gtk.Buildable):
             #print w, h , x, y, self
             if 0 <= x <= w and 0 <= y <= h:
                 return
+            self.__canceled = True
         #popup.__loop.quit()
         self.__loop.quit()
 
@@ -243,8 +328,14 @@ class Calendar(PopupWindow):
             self.__set_new_date = caller.set_label
             self.__old_date = caller.get_label()
         self.connect("key-press-event", self.__key_press)
-        if self.__old_date is None:
+        # If date didn't have a z number, use now
+        z = ['1', '2', '3', '4', '5', '6', '7', '8', '9']
+        if not self.__old_date or not sum(map(lambda x: x in z, self.__old_date)):
             date = datetime.datetime.now()
+            if self.__type == PoleUtil.HOLLERITH:
+                date = PoleUtil.convert_and_format(date, datetime.date, PoleUtil.MONTH)[1]
+        elif self.__type == PoleUtil.HOLLERITH:
+            date = self.__old_date
         else:
             date = PoleUtil.convert_and_format(self.__old_date, datetime.datetime, self.__type)[0]
         self.__frame = gtk.Frame()
@@ -264,17 +355,26 @@ class Calendar(PopupWindow):
         self.__buttons.pack_start(self.__ok)
         self.__buttons.pack_start(self.__today)
         self.__buttons.pack_start(self.__cancel)
-        if self.__type == PoleUtil.MONTH:
+        if self.__type in (PoleUtil.MONTH, PoleUtil.HOLLERITH):
             self.__table = gtk.Table(homogeneous = True)
             toggle = None
+            if self.__type == PoleUtil.HOLLERITH:
+                toggle = gtk.RadioButton(toggle, '13 - 13º')
+                toggle.set_mode(False)
+                toggle.set_relief(gtk.RELIEF_NONE)
+                toggle.get_children()[0].set_alignment(0.0, 0.5)
+                toggle.connect('button-press-event', self.__double_click)
+                self.__table.attach(toggle, 0, 1, 4, 5)
             for i in range(12, 0, -1):
-                toggle = gtk.RadioButton(toggle, '%02i - ' % i + datetime.date(1900,  i, 1).strftime('%B').capitalize())
+                toggle = gtk.RadioButton(toggle, '%02i - %s' % (i, datetime.date(1900,  i, 1).strftime('%B').capitalize()))
                 toggle.set_mode(False)
                 toggle.set_relief(gtk.RELIEF_NONE)
                 toggle.get_children()[0].set_alignment(0.0, 0.5)
                 toggle.connect('button-press-event', self.__double_click)
                 self.__table.attach(toggle, (i - 1) / 4, (i - 1) / 4 + 1, (i - 1) % 4, (i - 1) % 4 + 1)
-            self.__table.get_children()[date.month - 1].set_active(True)
+            month = int(date[:2]) if self.__type == PoleUtil.HOLLERITH else date.month
+            year = int(date[3:]) if self.__type == PoleUtil.HOLLERITH else date.year
+            self.__table.get_children()[month - 1].set_active(True)
             self.__vbox.set_spacing(15)
             self.__vbox.pack_start(self.__table)
             self.__hbox = gtk.HBox(spacing = 5)
@@ -282,14 +382,14 @@ class Calendar(PopupWindow):
             self.__hbox = gtk.HBox(spacing = 5)
             self.__year_label = gtk.Label(_('Year:'))
             self.__year_label.set_alignment(1.0, 0.5)
-            self.__year.get_adjustment().set_all(value = date.year,
+            self.__year.get_adjustment().set_all(value = year,
                                                  lower = 1,
                                                  upper = 9999,
                                                  step_increment = 1,
                                                  page_increment = 10)
             self.__hbox.pack_start(self.__year_label, expand = True, fill = True)
             self.__hbox.pack_start(self.__year, expand = False, fill = False)
-            self.__vbox.pack_start(self.__hbox, expand = False, fill = False)
+            self.__table.attach(self.__hbox, 1, 3, 4, 5)
             self.__vbox.pack_start(self.__buttons, expand = False, fill = False)
             self.__frame.add(self.__vbox)
             self.add(self.__frame)
@@ -358,9 +458,9 @@ class Calendar(PopupWindow):
 
     def __go_to_now(self, *args):
         date = datetime.datetime.now()
-        if self.__type == PoleUtil.MONTH:
+        if self.__type in (PoleUtil.MONTH, PoleUtil.HOLLERITH):
             self.__year.set_value(date.year)
-            self.__table.get_children()[date.month - 1].set_active(True)
+            self.__table.get_children()[date.month].set_active(True)
             return
         if self.__type in (PoleUtil.DATE, PoleUtil.DATE_TIME):
             self.__calendar.select_day(date.day)
@@ -375,12 +475,16 @@ class Calendar(PopupWindow):
         if self.__type in (PoleUtil.DATE, PoleUtil.DATE_TIME):
             date = self.__calendar.get_date()
             date = datetime.datetime(date[0], date[1] + 1, date[2])
-        elif self.__type == PoleUtil.MONTH:
+        elif self.__type in (PoleUtil.MONTH, PoleUtil.HOLLERITH):
             month = 0
-            for child in self.__table.get_children():
+            for child in self.__table.get_children()[1:]:
                 month += 1
                 if child.get_active():
                     break
+            if self.__type == PoleUtil.HOLLERITH:
+                self.__set_new_date("%02i/%04i"% (month, self.__year.get_value()))
+                self.quit()
+                return
             date = datetime.datetime(int(self.__year.get_value()), month, 1)
         else:
             date = datetime.datetime(1900, 1, 1)
@@ -419,35 +523,45 @@ class DateButton(gtk.Button, gtk.Buildable):
     def do_parser_finished(self, builder):
         configs = self.get_tooltip_text()
         if configs is None or '|' not in configs:
+            self.__default_date()
             return
         configs = [c.replace('0x00', '|') for c in configs.replace('\|','0x00').split('|', 1)]
         self.set_tooltip_text(configs[0])
         self.config(configs[1])
 
     def config(self, configs):
-        if type(configs) == int:
-            self.__type = configs
+        types = {'DATE': PoleUtil.DATE, 'TIME': PoleUtil.TIME, 'DATE_TIME': PoleUtil.DATE_TIME, 'MONTH': PoleUtil.MONTH, 'HOURS': PoleUtil.HOURS, 'DAYS_HOURS': PoleUtil.DAYS_HOURS, 'HOLLERITH': PoleUtil.HOLLERITH}
+        if configs in types.values():
+            self.__default_date()
             return
-        types = {'DATE': PoleUtil.DATE, 'TIME': PoleUtil.TIME, 'DATE_TIME': PoleUtil.DATE_TIME, 'MONTH': PoleUtil.MONTH, 'HOURS': PoleUtil.HOURS, 'DAYS_HOURS': PoleUtil.DAYS_HOURS}
         configs = [x.strip() for x in configs.split(',')]
         for c in configs:
             if c.upper() in types:
                 self.__type = types[c.upper()]
             if c.lower() == 'select_then_tab':
                 self.__select_then_tab = True
+        self.__default_date()
+
+    def __default_date(self):
+        # If date didn't have at least one of z number, use now
+        z = ['1', '2', '3', '4', '5', '6', '7', '8', '9']
+        if not self.get_label() or not sum(map(lambda x: x in z, self.get_label())):
+            conv_type = self.__type if self.__type != PoleUtil.HOLLERITH else PoleUtil.MONTH
+            self.set_label(PoleUtil.convert_and_format(datetime.datetime.now(), datetime.date, conv_type)[1])
 
     def do_clicked(self, *args, **kargs):
         old = self.get_label()
-        try:
-            x = PoleUtil.convert_and_format(old, datetime.datetime, self.__type)[1]
-        except ValueError:
-            x = PoleUtil.convert_and_format(datetime.datetime.now(), datetime.datetime, self.__type)[1]
-        self.set_label(x)
+        if self.__type != PoleUtil.HOLLERITH:
+            try:
+                x = PoleUtil.convert_and_format(old, datetime.datetime, self.__type)[1]
+            except ValueError:
+                x = PoleUtil.convert_and_format(datetime.datetime.now(), datetime.datetime, self.__type)[1]
+            self.set_label(x)
         changed = Calendar(self, self.__type).run()
-        self.updated = old != x or changed
+        self.updated = (self.__type != PoleUtil.HOLLERITH and old != x) or changed
         if self.__select_then_tab:
             self.__timer = gobject.timeout_add(500, self.__emit_tab)
-        super(DateButton, self).do_clicked(*args, **kargs)
+        # super(DateButton, self).do_clicked(self, *args, **kargs)
 
     def __emit_tab(self):
         gobject.source_remove(self.__timer)
@@ -527,6 +641,40 @@ class GridRow(object):
                 line[column] = formated[1]
         else:
             raise TypeError, _('Invalid type of column index or name `' + type(index) + '´.')
+    def path(self):
+        return self.__path
+
+
+class ComboBoxCompletion(gtk.ComboBox, gtk.Buildable):
+    __gtype_name__ = 'ComboBoxCompletion'
+
+    def __init__(self, *args, **kargs):
+        super(ComboBoxCompletion, self).__init__(*args, **kargs)
+        self.__completion = gtk.EntryCompletion()
+        self.__completion.set_model(self.get_model())
+        self.__completion.set_minimum_key_length(1)
+        self.__completion.set_text_column(0)
+        self.__completion.set_match_func(self.match_func)
+        self.__completion.connect('match-selected', self.on_match_selected)
+
+    def do_parser_finished(self, builder):
+        self.child.set_completion(self.__completion)
+        self.__completion.set_model(self.get_model())
+
+    def set_model(self, model):
+        super(ComboBoxCompletion, self).set_model(model)
+        self.__completion.set_model(model)
+
+    def match_func(self, completion, key, iter, column=0):
+        key = PoleUtil.formatar(key, "Livre Mai").replace(' ', '.*')
+        model = completion.get_model()
+        text = PoleUtil.formatar(model.get_value(iter, column), "Livre Mai")
+        return re.search(key, text)
+
+    def on_match_selected(self, completion, model, iter):
+        value = model.get_value(iter, 0)
+        set_active_text(self, value)
+
 
 class Editor(gtk.Entry, gtk.Buildable):
     __gtype_name__ = 'Editor'
@@ -703,6 +851,8 @@ class Grid(gtk.TreeView, gtk.Buildable):
 
         self.__model_pos = []
 
+        self.__wrap_width = 800
+
     def do_parser_finished(self, builder):
         configs = self.get_tooltip_text()
         if configs is None or '|' not in configs:
@@ -711,6 +861,9 @@ class Grid(gtk.TreeView, gtk.Buildable):
         #self.set_tooltip_text((configs[0], ' ')[configs[0] == ""])
         self.set_tooltip_text(configs[0])
         configs = [[x.strip() for x in i.split(',')] for i in configs[1:]]
+        if configs[0][0].strip()[:10] == 'wrap-width':
+            self.__wrap_width = int(configs[0][0].split('=')[1].strip())
+            configs = configs[1:]
         titles = []
         types = []
         decimals = []
@@ -729,6 +882,8 @@ class Grid(gtk.TreeView, gtk.Buildable):
                 types.append(bool)
             elif column[1] == 'int':
                 types.append(int)
+            elif column[1] == 'long':
+                types.append(long)
             elif column[1] == 'float':
                 types.append(float)
             elif column[1] == 'str':
@@ -825,7 +980,6 @@ class Grid(gtk.TreeView, gtk.Buildable):
         self.__decimals = decimals
         self.__editables = editables
         self.__with_colors = with_colors
-        self.__structurex = False
         for column in self.get_columns():
             self.remove_column(column)
             column.destroy()
@@ -872,6 +1026,9 @@ class Grid(gtk.TreeView, gtk.Buildable):
             else:
                 cell = gtk.CellRendererText()
                 cell.set_property('editable', editable)
+                if self.__wrap_width:
+                    cell.set_property('wrap-width', self.__wrap_width)
+                    cell.set_property('wrap-mode', pango.WRAP_WORD)
                 cell.connect('edited', self.__editable_callback, len(self.__model_pos) - 1)
                 cell.connect('editing-started', self.__start_editing_callback, len(self.__model_pos) - 1)
                 column.pack_start(cell)
@@ -930,6 +1087,14 @@ class Grid(gtk.TreeView, gtk.Buildable):
             self[path][column] = result
         return False
 
+    def __finish_editing(self, editor, event, popup):
+        key = event.keyval
+        if key == gtk.keysyms.Escape:
+            editor.props.text = self.__old_editing_text
+            popup.quit()
+        elif key in (gtk.keysyms.KP_Enter, gtk.keysyms.Return):
+            popup.quit()
+
     def __start_editing_callback(self, renderer, editable, path, column):
         #print '__start_editing_callback'
         #print 'renderer:', renderer
@@ -943,32 +1108,41 @@ class Grid(gtk.TreeView, gtk.Buildable):
         x, y = self.get_bin_window().get_origin()
         area = self.get_cell_area(path, self.get_column(column))
         size = (area[2], area[3])
-        position = (x + area[0], y + area[1])
-        old = new = editable.props.text
+        self.__old_editing_text = new = editable.props.text
         if self.__types[column] in (datetime.date, datetime.datetime, datetime.time):
+            position = (x + area[0], y + area[1] + area[3])
             c = Calendar(editable, self.__decimals[column])
             if c.run(position, transient_for = self):
                 new = cf(editable.props.text, self.__types[column], self.__decimals[column])[1]
         else:
+            position = (x + area[0], y + area[1])
             p = PopupWindow()
             e = Editor()
-            if self.__types[column] in (int, long):
+            e.connect('key-press-event', self.__finish_editing, p)
+            if self.__structurex and self.__formats[column]:
+                e.config(self.__formats[column])
+                e.set_max_length(self.__sizes[column])
+            elif self.__types[column] in (int, long):
                 e.config("int")
             elif self.__types[column] == float:
                 e.config("float" + str(self.__decimals[column]))
-            else:
-                e.config("upper,normalize")
-            if self.__structurex:
-                e.set_max_length(self.__sizes[column])
+            #else:
+            #    e.config("upper,normalize")
             e.set_has_frame(False)
             e.show()
             p.add(e)
-            e.props.text = old
+            e.props.text = self.__old_editing_text
+
+            # Out click do cancel
+            #if p.run(self, size, position):
+            #    new = cf(e.props.text, self.__types[column], self.__decimals[column])[1]
+
+            # Out click do not cancel
             p.run(self, size, position)
             new = cf(e.props.text, self.__types[column], self.__decimals[column])[1]
 
         #print new, old, new != old
-        if new != old:
+        if new != self.__old_editing_text:
             #print 'editing_done'
             editable.set_text(new)
             editable.editing_done()
@@ -1035,11 +1209,26 @@ class Grid(gtk.TreeView, gtk.Buildable):
                         PoleLog.log_except()
                         formated.append(False)
                         error = True
+                elif t == str and type(field) in (datetime.date, datetime.datetime):
+                    try:
+                        formated.append(PoleUtil.convert_and_format(field, t)[0])
+                    except (ValueError, TypeError):
+                        PoleLog.log_except()
+                        formated.append(False)
+                        error = True
                 else:
                     formated.append(field)
             if self.__with_colors:
                 formated += register[-2:]
+
+            self.freeze_child_notify()
+            self.set_model(None)
+
             last_iter = model.append(iter, formated)
+
+            self.set_model(model)
+            self.thaw_child_notify()
+
         if error:
             message(self, _("Some values could not be converted or formatted!\n\nThey will be displayed as they are and evalueted by zero (0 ou 0.0) or false."))
         if isinstance(last_iter, gtk.TreeIter):
@@ -1091,7 +1280,7 @@ class Grid(gtk.TreeView, gtk.Buildable):
         if error:
             message(self, _("Some values could not be converted or formatted!\n\nThey will be displayed as they are and evalueted by zero (0 ou 0.0) or false."))
 
-    def __get_line(self, path):
+    def __get_line(self, path, to_str=False):
         model_line = self.get_model()[path]
         values = []
         formateds = []
@@ -1107,6 +1296,9 @@ class Grid(gtk.TreeView, gtk.Buildable):
             if t in (int, long, float, datetime.datetime, datetime.date, datetime.time):
                 formateds.append(model_line[col+1])
                 col += 2
+            elif t is bool and to_str:
+                formateds.append(PoleUtil.convert_and_format(model_line[col], t)[1])
+                col += 1
             else:
                 formateds.append(model_line[col])
                 col += 1
@@ -1150,15 +1342,78 @@ class Grid(gtk.TreeView, gtk.Buildable):
         csv = '\t'.join(self.__titles) + '\n'
         cols = len(self.__titles)
         lines = len(self.get_model())
-        csv += '\n'.join('\t'.join(self.__get_line(i)[1][:cols]) for i in range(lines)) + '\n'
+        csv += '\n'.join(re.sub(r'\s', ' ', ';'.join(self.__get_line(i, to_str=True)[1][:cols]))
+                         for i in range(lines))
+        csv += '\n'
         if filename:
             open(filename, 'w').write(csv)
         else:
             gtk.clipboard_get(gtk.gdk.SELECTION_CLIPBOARD).set_text(csv)
 
+    def wrap_width(self, width):
+        self.__wrap_width = width
+
+    def live_load(self, cursor, clean=True, lines=200):
+        if clean:
+            self.clear()
+        records = True
+        pos = 0
+        while records:
+            if isinstance(cursor, (tuple, list)):
+                self.add_data(cursor[pos:pos + lines])
+                pos += lines
+                records = pos < len(cursor)
+            else:
+                records = cursor.fetchmany(lines)
+                self.add_data(records)
+            while gtk.events_pending():
+                gtk.main_iteration()
+
+    def selected(self):
+        return self.get_selection().get_selected()[1]
+
+    def select(self, line_or_column, column_value = None):
+        selection = self.get_selection()
+        if column_value:
+            for l in self[:]:
+                if l[line_or_column][0] == column_value:
+                    self.set_cursor(l.path())
+        else:
+            if isinstance(line_or_column, gtk.TreeIter):
+                line_or_column = self.get_model().get_path(line_or_column)
+            self.set_cursor(line_or_column)
+
+class Processing(gtk.Window):
+    def __init__(self, parent, title):
+        self.update_ui()
+        super(Processing, self).__init__()
+        self.set_title(title)
+        self.__bar = gtk.ProgressBar()
+        self.add(self.__bar)
+        self.set_transient_for(parent.get_toplevel())
+        self.set_modal(True)
+        self.set_position(gtk.WIN_POS_CENTER_ON_PARENT)
+        self.set_type_hint(gtk.gdk.WINDOW_TYPE_HINT_DIALOG)
+        self.set_deletable(False)
+        self.set_size_request(400, -1)
+        self.show_all()
+        self.update_ui()
+
+    def update_ui(self):
+        while gtk.events_pending():
+            gtk.main_iteration()
+
+    def pulse(self):
+        self.__bar.pulse()
+        self.update_ui()
+
+    def close(self):
+        self.destroy()
+        self.update_ui()
+
 def load_module(parent_project, parent_main_window, module_name, title, main_window_name, data = None):
     loop = glib.MainLoop()
-    module = __import__(module_name)
+    module = importlib.import_module(module_name)
     if data is None:
         data = []
     if isinstance(parent_main_window, VirtualWidget):
@@ -1208,6 +1463,7 @@ NEW_CLASSES = (
     ('GtkEntry', 'Editor', 'ed_'),
     ('GtkWindow', 'PopupWindow', 'popup_'),
     ('GtkButton', 'DateButton', 'dt_'),
+    ('GtkComboBox', 'ComboBoxCompletion', 'cc_'),
 )
 
 def build_interface(xml_file_or_xml_string = None):
@@ -1227,7 +1483,7 @@ def build_interface(xml_file_or_xml_string = None):
         xml = xml.replace('<object class="' + gtk_class + '" id="' + start_of_name,
                           '<object class="' + pole_class + '" id="' + start_of_name)
     # Solving troble with can_focus false
-    dont_have_can_focus = ('ListStore', 'Adjustment', 'TextBuffer', 'Action', 'TreeViewColumn')
+    dont_have_can_focus = ('ListStore', 'Adjustment', 'TextBuffer', 'Action', 'TreeViewColumn', 'CellRendererPixbuf', 'CellRendererText')
     pos = xml.find('<object class="')
     while pos != -1:
         have_can_focus = True
@@ -1309,10 +1565,13 @@ class Project(object):
         # Criar uma coluna de dados para os combos, por padrão a coluna 0
         # Comente ou altere para a coluna desejada
         for combo in [x for x in self.interface.get_objects()
-                           if type(x) == gtk.ComboBox]:
-            celula = gtk.CellRendererText()
-            combo.pack_start(celula, False)
-            combo.add_attribute(celula, "text", 0)
+                                        if isinstance(x, gtk.ComboBox)]:
+            if not combo.get_has_entry():
+                celula = gtk.CellRendererText()
+                combo.pack_start(celula, False)
+                combo.add_attribute(celula, "text", 0)
+            elif combo.get_entry_text_column() == -1:
+                combo.set_entry_text_column(0)
         # Resolver problema de imagens não exibidas nos botões
         # Comente caso queira o comportamento configurado no Gnome, pois
         #     a partir da versão 2.28 por padrão não mostra, sendo que
@@ -1321,7 +1580,7 @@ class Project(object):
         #     a chave "/desktop/gnome/interface/buttons_have_icons" ou execute
         #     "gconftool --toggle /desktop/gnome/interface/buttons_have_icons"
         for botao in [x for x in self.interface.get_objects()
-                                                      if type(x) == gtk.Button]:
+                                          if isinstance(x, gtk.Button)]:
             try:
                 botao.child.child.get_children()[0].show()
             except:
@@ -1356,6 +1615,7 @@ class Project(object):
                               "consulteds_attributes")[attribute] = None
         return object.__getattribute__(self, attribute)
 
+
 def try_function(f):
     def action(project, *args, **kwargs):
         try:
@@ -1368,25 +1628,22 @@ def try_function(f):
     return action
 
 
-def read_text(textview, format=True, trimspace=True):
+def read_text(textview, format=True):
     buffer = textview.get_buffer()
     text = strip(buffer.get_text(*buffer.get_bounds()))
+    text = re.sub('[\t\r\f\v]', ' ', text)
 
     if format:
         text = formatar(text, 'Nome Mai')
-
-    if trimspace:
-        return re.sub('\s', ' ', text)
 
     return text
 
 
-def write_text(text, textview, format=True, trimspace=True):
+def write_text(text, textview, format=True):
     if format:
         text = formatar(text, 'Nome Mai')
 
-    if trimspace:
-        text = re.sub('\s', ' ', text)
+    text = re.sub('[\t\r\f\v]', ' ', text)
 
     buffer = textview.get_buffer()
     buffer.set_text(strip(text))
@@ -1406,28 +1663,21 @@ def get_active_text(combo, column=0):
     return model[index][column]
 
 
-def load_store(combo, cursor):
-        model = combo.get_model()
-        model.clear()
-
-        for iter in cursor:
-            model.append(iter)
-
+def load_store(combo, cursor, active=True):
+    model = combo.get_model()
+    model.clear()
+    for row in cursor:
+        model.append(row)
+    if active:
         combo.set_active(0)
 
 
-def load_grid(grid, cursor, clean=True, lines=100):
-    if clean:
-            grid.clear()
-
-    records = True
-    while records:
-        records = cursor.fetchmany(lines)
-        grid.add_data(records)
-
-        while gtk.events_pending():
-            gtk.main_iteration()
-
+def hide_window(widget):
+    if widget.is_toplevel():
+        return widget.hide_on_delete()
+    else:
+        toplevel = widget.get_toplevel()
+        toplevel.hide()
 
 if __name__ == '__main__':
     teste_ui = """<?xml version="1.0"?>
@@ -1577,6 +1827,18 @@ if __name__ == '__main__':
                 <property name="position">5</property>
               </packing>
             </child>
+            <child>
+              <object class="GtkComboBox" id="cc_teste">
+                <property name="visible">True</property>
+                <property name="model">liststore1</property>
+                <property name="wrap_width">1</property>
+                <property name="has_entry">True</property>
+                <property name="entry_text_column">0</property>
+              </object>
+              <packing>
+                <property name="position">6</property>
+              </packing>
+            </child>
           </object>
           <packing>
             <property name="position">3</property>
@@ -1585,6 +1847,15 @@ if __name__ == '__main__':
       </object>
     </child>
   </object>
+  <object class="GtkListStore" id="liststore1">
+    <columns>
+      <!-- column-name Texto -->
+      <column type="gchararray"/>
+      <!-- column-name Código -->
+      <column type="gint"/>
+    </columns>
+  </object>
+
 </interface>
 """
 
@@ -1679,6 +1950,14 @@ if __name__ == '__main__':
     ui = build_interface(teste_ui)
     ui.connect_signals({'click': click, 'quit': gtk.main_quit, 'update_click': update, 'calendar': calendar})
     ui.get_object('gr_treeview1').format_callback = fx
+    completar = ui.get_object('liststore1')
+    completar.append(('Teste1', 1))
+    completar.append(('Teste2', 2))
+    completar.append(('aTeste3', 3))
+    completar.append(('bTeste4', 4))
+    completar.append(('cTeste5', 5))
+    completar.append(('Junior Polegato', 5))
+    completar.append(('Claudio Polegato Junior', 5))
     gtk.main()
     exit(0)
 
